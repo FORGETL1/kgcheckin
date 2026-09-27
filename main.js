@@ -202,14 +202,15 @@ async function main() {
 
   // 邮箱通知频率控制：默认只在每周一（北京时间）发送邮件，其余日期跳过，避免每天收信。
   // 仅影响「邮箱」渠道，其它渠道（Server酱 / PushPlus / 企业微信等）仍按原频率每天发送。
-  // 当天出现异常时不受限制，仍然立即发送，避免问题被压到下一周才发现。
+  // 当天出现硬性异常（token 失效、领取失败、脚本报错）时不受限制，仍然立即发送，
+  // 避免问题被压到下一周才发现；「今日已领取 / 次数已用光」这类正常情况不算异常，不会发信。
   // 如需改到别的星期：仓库 Settings → Secrets and variables → Variables 新增
   // NOTIFY_MAIL_DOW（0=周日、1=周一 …… 6=周六），无需改代码。
   const notifyMailDowRaw = process.env.NOTIFY_MAIL_DOW
   const notifyMailDowParsed = (notifyMailDowRaw === undefined || notifyMailDowRaw === '') ? NaN : Number(notifyMailDowRaw)
   const WEEKLY_MAIL_DOW = (Number.isInteger(notifyMailDowParsed) && notifyMailDowParsed >= 0 && notifyMailDowParsed <= 6) ? notifyMailDowParsed : 1
   const isMailNotifyDay = today.getDay() === WEEKLY_MAIL_DOW
-  const hasAbnormal = hasError || notifyResults.some(r => r.status !== '成功')
+  const hasAbnormal = hasError || notifyResults.some(r => r.status === '失败')
   if (!isMailNotifyDay && !hasAbnormal) {
     delete process.env.MAIL_HOST
     delete process.env.MAIL_USER
