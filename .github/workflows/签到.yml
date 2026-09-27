@@ -64,3 +64,6 @@ jobs:
           MAIL_USER: ${{ secrets.MAIL_USER }}
           MAIL_PASS: ${{ secrets.MAIL_PASS }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
+          # 邮件通知频率：只在指定的星期发邮件（0=周日、1=周一 …… 6=周六）
+          # 未设置或留空时默认 1（周一）；出现异常当天仍会立即发送
+          NOTIFY_MAIL_DOW: ${{ vars.NOTIFY_MAIL_DOW }}
