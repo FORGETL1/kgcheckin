@@ -4,6 +4,95 @@ import { maskDisplayName, maskIdentifier, sanitizeForLog, summarizeResponse } fr
 import { sendNotify } from "./utils/notify.js";
 import { close_api, delay, send, startService, waitForApi } from "./utils/utils.js";
 
+/* ------------------------------------------------------------------ */
+/*  本周签到结果累计（周一发周报时使用）                                */
+/* ------------------------------------------------------------------ */
+
+// 读取已累计的签到记录；任何异常都退化为空数组，绝不影响主流程
+function readWeeklyLog() {
+  const raw = process.env.WEEKLY_SUMMARY
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed?.days) ? parsed.days : []
+  } catch (e) {
+    printYellow("历史签到记录解析失败，本次从空开始累计")
+    return []
+  }
+}
+
+// 写回累计记录；失败只告警，绝不抛错 —— PAT 过期等情况不该再把整次运行判成失败
+function writeWeeklyLog(days) {
+  if (!hasSecretWriteToken()) {
+    printYellow("未配置 PAT，本周累计记录无法保存（不影响签到）")
+    return false
+  }
+  try {
+    setRepoSecret("WEEKLY_SUMMARY", JSON.stringify({ days: days.slice(-7) }))
+    printGreen(`已累计本周签到记录 ${Math.min(days.length, 7)} 天`)
+    return true
+  } catch (e) {
+    printYellow(`本周累计记录写入失败（不影响签到）: ${e?.message || e}`)
+    return false
+  }
+}
+
+// 取某条记录的星期；字段缺失或越界时由日期反推，避免出现「周undefined」
+function dowOf(day) {
+  if (Number.isInteger(day?.dow) && day.dow >= 0 && day.dow <= 6) return day.dow
+  const t = new Date(`${String(day?.date || '').slice(0, 10)}T00:00:00Z`)
+  return Number.isNaN(t.getTime()) ? 0 : t.getUTCDay()
+}
+
+// 把一周记录 + 今天的结果渲染成周报正文
+function buildWeeklyContent(history, todayRecord, isTest) {
+  const DOW = ['日', '一', '二', '三', '四', '五', '六']
+  let out = ''
+  if (history.length) {
+    out += `📅 周期: ${history[0].date} ~ ${history[history.length - 1].date}\n`
+    out += `📊 记录天数: ${history.length} 天\n\n`
+
+    // 按账号分组汇总
+    const byName = {}
+    for (const d of history) {
+      for (const a of (d.accounts || [])) {
+        const key = a.n || '未知'
+        const b = (byName[key] = byName[key] || { ok: 0, fail: 0, claim: 0, expiry: '未知' })
+        if (a.s === '成功') b.ok++; else b.fail++
+        const got = Number(String(a.c || '0').split('/')[0])
+        if (Number.isFinite(got)) b.claim += got
+        if (a.v && a.v !== '未知') b.expiry = a.v
+      }
+    }
+    for (const n of Object.keys(byName)) {
+      const b = byName[n]
+      out += `【${n}】\n`
+      out += `  ✅ 成功 ${b.ok} 天   ❌ 失败 ${b.fail} 天\n`
+      out += `  🎁 累计领取 ${b.claim} 次\n`
+      out += `  ⏰ VIP到期 ${b.expiry}\n\n`
+    }
+    out += `─── 每日明细 ───\n`
+    for (const d of history) {
+      const ok = (d.accounts || []).every(a => a.s === '成功')
+      const parts = (d.accounts || []).map(a => `${a.n} ${a.s} 🎵${a.l} 🎁${a.c}`).join(' | ')
+      out += `${ok ? '✅' : '⚠️'} ${d.date} 周${DOW[dowOf(d)]}  ${parts}\n`
+    }
+  } else {
+    out += `📅 周期: ${todayRecord.date}\n`
+    out += `⚠️ 暂无历史累计记录（首次启用周报，或 PAT 未配置导致无法保存），以下仅含当天\n\n`
+  }
+
+  out += `\n─── 今日 ${todayRecord.date} 周${DOW[todayRecord.dow]} ───\n`
+  for (const a of todayRecord.accounts) {
+    const mark = a.s === '成功' ? '✅' : (a.s === '失败' ? '❌' : '⚠️')
+    out += `${mark} ${a.n} ${a.s}  🎵${a.l}  🎁${a.c}  ⏰${a.v}\n`
+  }
+  if (isTest) {
+    out += `\n（这是手动触发的测试邮件，不会改动周期统计，也不影响每日签到）\n`
+  }
+  return out
+}
+
 async function main() {
 
   const USERINFO = process.env.USERINFO
@@ -183,7 +272,7 @@ async function main() {
   }
 
   // 构建通知内容（放在 secret 更新之后、错误抛出之前，确保始终执行）
-  const title = `酷狗签到${hasError ? '异常' : '成功'} ${date}`
+  let title = `酷狗签到${hasError ? '异常' : '成功'} ${date}`
   let content = `📅 日期: ${date}\n`
   content += `📊 账号数: ${notifyResults.length}\n`
   const successCount = notifyResults.filter(r => r.status === '成功').length
@@ -200,6 +289,22 @@ async function main() {
     }
   }
 
+  // ── 本周签到结果累计 ──
+  // 每天把当次结果存进仓库 Secret <WEEKLY_SUMMARY>，周一发周报时汇总成整周明细。
+  // 读/写失败只告警，绝不让整次运行失败（PAT 过期曾把整次 run 误判成失败，别重蹈覆辙）。
+  const storedDays = readWeeklyLog()
+  const history = storedDays.filter(d => d && d.date && d.date !== date).slice(-7)
+  const todayRecord = {
+    date,
+    dow: today.getDay(),
+    accounts: notifyResults.map(r => ({
+      n: r.nickname, s: r.status, l: r.listen, c: r.vipClaim, v: r.vipExpiry,
+    })),
+  }
+
+  // 手动触发时的测试开关：强制发一封周报邮件，且不改动周期统计
+  const isTest = process.env.NOTIFY_TEST === 'true'
+
   // 邮箱通知频率控制：默认只在每周一（北京时间）发送邮件，其余日期跳过，避免每天收信。
   // 仅影响「邮箱」渠道，其它渠道（Server酱 / PushPlus / 企业微信等）仍按原频率每天发送。
   // 当天出现硬性异常（token 失效、领取失败、脚本报错）时不受限制，仍然立即发送，
@@ -211,7 +316,8 @@ async function main() {
   const WEEKLY_MAIL_DOW = (Number.isInteger(notifyMailDowParsed) && notifyMailDowParsed >= 0 && notifyMailDowParsed <= 6) ? notifyMailDowParsed : 1
   const isMailNotifyDay = today.getDay() === WEEKLY_MAIL_DOW
   const hasAbnormal = hasError || notifyResults.some(r => r.status === '失败')
-  if (!isMailNotifyDay && !hasAbnormal) {
+  const sendMail = isMailNotifyDay || hasAbnormal || isTest
+  if (!sendMail) {
     delete process.env.MAIL_HOST
     delete process.env.MAIL_USER
     delete process.env.MAIL_PASS
@@ -219,11 +325,24 @@ async function main() {
     printYellow(`今天不是每周邮件通知日（每周${'日一二三四五六'[WEEKLY_MAIL_DOW]}），已跳过邮件通知`)
   }
 
+  // 周一（或手动测试）时改用周报格式：整周汇总 + 今天的即时结果
+  if (isMailNotifyDay || isTest) {
+    const range = history.length ? `${history[0].date} ~ ${history[history.length - 1].date}` : date
+    title = `酷狗签到周报 ${range}${isTest ? '（测试）' : ''}`
+    content = buildWeeklyContent(history, todayRecord, isTest)
+  }
+
   // 发送通知（确保即使 secret 更新失败也能发出）
   try {
     await sendNotify(title, content)
   } catch (e) {
     printYellow(`通知发送异常: ${e.message}`)
+  }
+
+  // 周期统计回写：周一发完周报后以今天为新起点重新累计；其余日期追加当天结果。
+  // 手动测试不改动任何统计，避免干扰真实数据。
+  if (!isTest) {
+    writeWeeklyLog(isMailNotifyDay ? [todayRecord] : history.concat([todayRecord]).slice(-7))
   }
 
   if (Object.keys(errorMsg).length > 0) {
