@@ -1,6 +1,11 @@
 name: 签到
 on:
   workflow_dispatch:
+    inputs:
+      test_notify:
+        description: '只发一封周报测试邮件（不改动周期统计，也不影响签到）；只想补签到就取消勾选'
+        type: boolean
+        default: true
   schedule:
     - cron: '10 17 * * *'
 permissions:
@@ -67,3 +72,6 @@ jobs:
           # 邮件通知频率：只在指定的星期发邮件（0=周日、1=周一 …… 6=周六）
           # 未设置或留空时默认 1（周一）；出现异常当天仍会立即发送
           NOTIFY_MAIL_DOW: ${{ vars.NOTIFY_MAIL_DOW }}
+          NOTIFY_TEST: ${{ github.event.inputs.test_notify }}
+          # 本周签到结果累计（脚本自动读写，无需手工维护）
+          WEEKLY_SUMMARY: ${{ secrets.WEEKLY_SUMMARY }}
