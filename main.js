@@ -37,6 +37,11 @@ function writeWeeklyLog(days) {
   }
 }
 
+// 只有这两类算真异常；「今日已领」（当天额度已用完）属于正常，不计入失败
+function isBadStatus(status) {
+  return status === '失败' || status === '部分失败'
+}
+
 // 取某条记录的星期；字段缺失或越界时由日期反推，避免出现「周undefined」
 function dowOf(day) {
   if (Number.isInteger(day?.dow) && day.dow >= 0 && day.dow <= 6) return day.dow
@@ -58,7 +63,7 @@ function buildWeeklyContent(history, todayRecord, isTest) {
       for (const a of (d.accounts || [])) {
         const key = a.n || '未知'
         const b = (byName[key] = byName[key] || { ok: 0, fail: 0, claim: 0, expiry: '未知' })
-        if (a.s === '成功') b.ok++; else b.fail++
+        if (isBadStatus(a.s)) b.fail++; else b.ok++
         const got = Number(String(a.c || '0').split('/')[0])
         if (Number.isFinite(got)) b.claim += got
         if (a.v && a.v !== '未知') b.expiry = a.v
@@ -73,7 +78,7 @@ function buildWeeklyContent(history, todayRecord, isTest) {
     }
     out += `─── 每日明细 ───\n`
     for (const d of history) {
-      const ok = (d.accounts || []).every(a => a.s === '成功')
+      const ok = (d.accounts || []).every(a => !isBadStatus(a.s))
       const parts = (d.accounts || []).map(a => `${a.n} ${a.s} 🎵${a.l} 🎁${a.c}`).join(' | ')
       out += `${ok ? '✅' : '⚠️'} ${d.date} 周${DOW[dowOf(d)]}  ${parts}\n`
     }
@@ -84,7 +89,7 @@ function buildWeeklyContent(history, todayRecord, isTest) {
 
   out += `\n─── 今日 ${todayRecord.date} 周${DOW[todayRecord.dow]} ───\n`
   for (const a of todayRecord.accounts) {
-    const mark = a.s === '成功' ? '✅' : (a.s === '失败' ? '❌' : '⚠️')
+    const mark = a.s === '失败' ? '❌' : (isBadStatus(a.s) ? '⚠️' : '✅')
     out += `${mark} ${a.n} ${a.s}  🎵${a.l}  🎁${a.c}  ⏰${a.v}\n`
   }
   if (isTest) {
@@ -191,6 +196,7 @@ async function main() {
         printYellow("开始领取VIP...")
         let claimCount = 0
         let claimTotal = 0
+        let usedUp = false // 今天额度已用完（已领过），区别于真正的领取失败
         for (let i = 1; i <= 8; i++) {
           // ad获取vip
           const ad = await send(`/youth/vip?timestrap=${Date.now()}`, "GET", headers)
@@ -203,6 +209,7 @@ async function main() {
             }
           } else if (ad.error_code === 30002) {
             printGreen("今天次数已用光")
+            usedUp = true
             break
           } else {
             printRed(`第${i}次领取失败`)
@@ -224,9 +231,15 @@ async function main() {
           hasError = true
         }
 
+        // 「今日已领」= 当天额度本就用完了（比如已手动领过），不是失败，不该在周报里显示成异常
+        let finalStatus
+        if (listenStatus === '失败') finalStatus = '失败'
+        else if (claimCount === 0) finalStatus = usedUp ? '今日已领' : '部分失败'
+        else finalStatus = '成功'
+
         notifyResults.push({
           nickname: safeNickname,
-          status: listenStatus === '失败' || claimCount === 0 ? '部分失败' : '成功',
+          status: finalStatus,
           listen: listenStatus,
           vipClaim: `${claimCount}/${claimTotal}`,
           vipExpiry,
